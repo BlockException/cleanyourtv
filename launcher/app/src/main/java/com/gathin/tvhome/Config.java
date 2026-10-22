@@ -39,6 +39,10 @@ final class Config {
     static final String SETTINGS_NAME = "launcher_settings";
     static final String ROWS_BELOW_DOCK_KEY = "rows_below_dock";
     static final String WALLPAPER_CHOICE_KEY = "wallpaper_choice";
+    static final String WALLPAPER_MODE_KEY = "wallpaper_mode";
+    static final String WALLPAPER_URL_KEY = "wallpaper_url";
+    static final String WALLPAPER_INTERVAL_KEY = "wallpaper_interval_seconds";
+    static final String WALLPAPER_CROSSFADE_KEY = "wallpaper_crossfade_seconds";
     private static final String THEME_REVISION_NAME = "theme_revision";
     private static final String THEME_SIGNATURE_KEY = "theme_signature";
 
@@ -136,6 +140,10 @@ final class Config {
      * invalid values keep the historical shuffle so existing themes rotate exactly as before.
      */
     final String wallpaperOrder;
+    final boolean dynamicWallpaper;
+    final String dynamicWallpaperUrl;
+    final int dynamicWallpaperIntervalSeconds;
+    final int dynamicWallpaperCrossfadeSeconds;
     /** Whether the overlay file was present and parsed. */
     final boolean overlayApplied;
     /** Festive skin from a theme (festival, festival_until, greeting, accent_color); {@link Festival#NONE} if none. */
@@ -173,7 +181,8 @@ final class Config {
                    Festival festival, int[] inputKeycodes, List<String> appKeys, String stockHomeRedirect,
                    List<RaceWeekend.Race> raceCalendar, boolean cinematicHome, boolean ambientGlow, boolean appGlow, int homeIdleClockMinutes,
                    boolean keyFilter, boolean dockGlass, String glowStyle, boolean wallpaperCaptions,
-                   boolean handleViewInputs) {
+                   boolean handleViewInputs, boolean dynamicWallpaper, String dynamicWallpaperUrl,
+                   int dynamicWallpaperIntervalSeconds, int dynamicWallpaperCrossfadeSeconds) {
         this.handleViewInputs = handleViewInputs;
         this.inputKeycodes = inputKeycodes;
         this.appKeys = Collections.unmodifiableList(appKeys);
@@ -229,6 +238,10 @@ final class Config {
         this.wallpaperDim = wallpaperDim;
         this.dockOpacity = dockOpacity;
         this.wallpaperOrder = wallpaperOrder;
+        this.dynamicWallpaper = dynamicWallpaper;
+        this.dynamicWallpaperUrl = dynamicWallpaperUrl;
+        this.dynamicWallpaperIntervalSeconds = dynamicWallpaperIntervalSeconds;
+        this.dynamicWallpaperCrossfadeSeconds = dynamicWallpaperCrossfadeSeconds;
         this.overlayApplied = overlayApplied;
         this.festival = festival;
         this.raceCalendar = Collections.unmodifiableList(raceCalendar);
@@ -403,11 +416,21 @@ final class Config {
         // An on-TV wallpaper pick overrides the theme: a filename from the wallpapers/
         // collection, or "none". Unset means the theme decides (off by default).
         String wallpaperChoice = choices.getString(WALLPAPER_CHOICE_KEY, null);
-        if ("none".equals(wallpaperChoice)) {
+        String wallpaperMode = choices.getString(WALLPAPER_MODE_KEY, "");
+        if (wallpaperMode.isEmpty()) {
+            wallpaperMode = "none".equals(wallpaperChoice) ? "none"
+                    : wallpaperChoice == null ? "theme" : "static";
+        }
+        String dynamicWallpaperUrl = WallpaperSettings.validUrl(
+                choices.getString(WALLPAPER_URL_KEY, ""));
+        boolean dynamicWallpaper = "dynamic".equals(wallpaperMode) && dynamicWallpaperUrl != null;
+        if ("none".equals(wallpaperMode) || "none".equals(wallpaperChoice)) {
             wallpapers.clear();
             wallpaper = null;
             wallpaperEnabled = false;
-        } else if (wallpaperChoice != null && dir != null) {
+            dynamicWallpaper = false;
+        } else if (("static".equals(wallpaperMode) || "dynamic".equals(wallpaperMode))
+                && wallpaperChoice != null && !"none".equals(wallpaperChoice) && dir != null) {
             File picked = WallpaperRotation.find(
                     WallpaperRotation.images(new File(dir, "wallpapers")), wallpaperChoice);
             if (picked == null && wallpaperChoice.equals(
@@ -419,6 +442,17 @@ final class Config {
                 wallpaperEnabled = true;
             }
         }
+        if ("dynamic".equals(wallpaperMode) && dynamicWallpaper) {
+            wallpapers.clear();
+            if (wallpaper != null) wallpapers.add(wallpaper);
+            wallpaperEnabled = true;
+        } else if ("dynamic".equals(wallpaperMode)) {
+            Log.w(TAG, "Dynamic wallpaper is selected but its URL is invalid; using the theme wallpaper");
+        }
+        int dynamicWallpaperIntervalSeconds = WallpaperSettings.intervalSeconds(
+                choices.getInt(WALLPAPER_INTERVAL_KEY, WallpaperSettings.DEFAULT_INTERVAL_SECONDS));
+        int dynamicWallpaperCrossfadeSeconds = WallpaperSettings.crossfadeSeconds(
+                choices.getInt(WALLPAPER_CROSSFADE_KEY, WallpaperSettings.DEFAULT_CROSSFADE_SECONDS));
         // A festive skin comes only from a theme; config.xml has no festival.
         Festival festival = json == null ? Festival.NONE : Festival.parse(string(json, "festival", ""),
                 string(json, "festival_until", ""), string(json, "greeting", ""), string(json, "accent_color", ""));
@@ -431,7 +465,9 @@ final class Config {
                 Math.max(0, Math.min(100, skyIntensity)), settingsKeycodes, settingsKeyPanel, wallpaperEnabled, wallpaper,
                 wallpapers, rotationMinutes, wallpaperDim, dockOpacity, wallpaperOrder, applied,
                 festival, inputKeycodes, appKeys, stockHomeRedirect, json == null ? Collections.emptyList() : raceCalendar(json), cinematic, ambientGlow, appGlow,
-                Math.max(0, idleClockMinutes), keyFilter, dockGlass, glowStyle, wallpaperCaptions, handleViewInputs);
+                Math.max(0, idleClockMinutes), keyFilter, dockGlass, glowStyle, wallpaperCaptions, handleViewInputs,
+                dynamicWallpaper, dynamicWallpaper ? dynamicWallpaperUrl : "",
+                dynamicWallpaperIntervalSeconds, dynamicWallpaperCrossfadeSeconds);
     }
 
     /**

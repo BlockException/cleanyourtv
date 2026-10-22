@@ -129,12 +129,18 @@ An empty collection falls back to `wallpaper.jpg`, or the background colour if n
 Selection is random without an immediate repeat when alternatives exist. The current image and its
 change time survive app/process restarts. Rotation runs only while Home is visible; on return from
 another app, an overdue background changes then. Images are decoded on a worker thread and bounded
-to the screen size. There is no download service, Internet permission or computer-side scheduler.
+to the screen size. Local wallpapers do not need network access or a computer-side scheduler.
 The original system idle screensaver is left unchanged.
 
 On the TV, Launcher settings has a Wallpaper row: pick one picture from the collection (or the theme's
-`wallpaper.jpg`), or None. A pick shows that one picture and stops the rotation until you choose Theme
-default, press Follow theme, or push a theme again.
+`wallpaper.jpg`), choose Dynamic from URL, or None. A static pick shows that one picture and stops the
+rotation until you choose Theme default, press Follow theme, or push a theme again. To choose a static
+fallback, select that local picture before setting the dynamic URL. Dynamic wallpaper requests the URL
+only while Home is visible; its fallback is the selected local picture or the theme's `wallpaper.jpg`.
+The previous image stays up after a failed request. The URL is not cached to disk; responses are limited
+to 10 MB and decoded to the screen size. Refresh intervals start at 10 seconds (custom values up to
+24 hours), and the crossfade defaults to 2 seconds (configurable from 1 to 10). HTTPS is recommended;
+HTTP is supported for local services but is unencrypted.
 
 ## Reduced motion
 

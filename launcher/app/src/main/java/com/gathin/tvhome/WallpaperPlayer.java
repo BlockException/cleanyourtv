@@ -5,6 +5,8 @@ import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.util.Log;
@@ -16,7 +18,12 @@ import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.TextView;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -25,14 +32,18 @@ import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Displays and rotates a theme's local wallpaper images while Home is visible. */
+/** Displays local or URL-backed wallpapers only while Home is visible. */
 final class WallpaperPlayer {
     private final FrameLayout root;
-    private final ImageView image;
+    private ImageView image;
     private final List<File> files;
     private final long interval;
+    private final long dynamicInterval;
+    private final long dynamicCrossfade;
+    private final String dynamicUrl;
     private final String order;
     private final SharedPreferences preferences;
+    private final Handler handler = new Handler(Looper.getMainLooper());
     private final ExecutorService decoder = Executors.newSingleThreadExecutor();
     private final Random random = new Random();
     private final int width;
@@ -46,20 +57,38 @@ final class WallpaperPlayer {
     private boolean active;
     private boolean closed;
     private boolean loading;
+    private boolean transitioning;
+    private ImageView incoming;
+    private Bitmap incomingBitmap;
     private String displayed = "";
     /** wallpaper_captions: the shown picture's name from wallpapers/captions.txt; null when off or there are none. */
     private final TextView caption;
     private final Map<String, String> names;
+    private final Runnable refreshDynamic = new Runnable() {
+        @Override
+        public void run() {
+            if (!active || closed || dynamicUrl.isEmpty()) return;
+            update();
+            handler.postDelayed(this, dynamicInterval);
+        }
+    };
 
     WallpaperPlayer(Context context, FrameLayout root, Config config) {
         this.root = root;
         files = new ArrayList<>(config.wallpapers);
         interval = config.wallpaperRotationMinutes * 60_000L;
+        dynamicUrl = config.dynamicWallpaper ? config.dynamicWallpaperUrl : "";
+        dynamicInterval = config.dynamicWallpaperIntervalSeconds * 1000L;
+        dynamicCrossfade = config.dynamicWallpaperCrossfadeSeconds * 1000L;
         bitmapConfig = config.wallpaperTrueColor ? Bitmap.Config.ARGB_8888 : Bitmap.Config.RGB_565;
         // The dim is painted into the picture (decode), so no full-screen shade layer is drawn on every frame.
         dimColor = config.wallpaperDim > 0 ? (config.wallpaperDim * 255 / 100) << 24 : 0;
         order = config.wallpaperOrder;
         preferences = context.getSharedPreferences("wallpaper_rotation", Context.MODE_PRIVATE);
+        if (config.dynamicWallpaper
+                && !dynamicUrl.equals(preferences.getString("remote_url", ""))) {
+            preferences.edit().putString("remote_url", dynamicUrl).remove("remote_changed").apply();
+        }
         // Playback state belongs to one collection. Changing the collection starts from its first
         // picture instead of resuming a filename that belonged to the previous one.
         String collection = collectionKey(files);
@@ -114,20 +143,28 @@ final class WallpaperPlayer {
     void start() {
         active = true;
         update();
+        if (!dynamicUrl.isEmpty()) handler.postDelayed(refreshDynamic, dynamicInterval);
     }
 
     void stop() {
         active = false;
+        handler.removeCallbacks(refreshDynamic);
+        finishTransition();
     }
 
     void close() {
-        active = false;
+        stop();
         closed = true;
         decoder.shutdownNow();
     }
 
     void update() {
-        if (!active || closed || loading || files.isEmpty()) return;
+        if (!active || closed || loading || transitioning) return;
+        if (!dynamicUrl.isEmpty()) {
+            updateDynamic();
+            return;
+        }
+        if (files.isEmpty()) return;
         String previous = preferences.getString("image", "");
         File selected = WallpaperRotation.find(files, previous);
         long changed = preferences.getLong("changed", 0);
@@ -160,6 +197,173 @@ final class WallpaperPlayer {
                 }
             });
         });
+    }
+
+    private void updateDynamic() {
+        long changed = preferences.getLong("remote_changed", 0);
+        if (!WallpaperRotation.due(changed, System.currentTimeMillis(), dynamicInterval)) return;
+        loading = true;
+        decoder.execute(() -> {
+            Bitmap bitmap = null;
+            try {
+                byte[] bytes = download(dynamicUrl);
+                bitmap = decode(bytes);
+                if (bitmap == null) throw new IOException("Response is not a supported wallpaper image");
+            } catch (IOException | RuntimeException failure) {
+                Log.w("TvHome.Wallpaper", "Remote wallpaper request failed", failure);
+            } catch (OutOfMemoryError failure) {
+                Log.e("TvHome.Wallpaper", "Not enough memory to download the wallpaper image", failure);
+            }
+            Bitmap result = bitmap;
+            root.post(() -> {
+                loading = false;
+                if (closed || !active) {
+                    if (result != null && !result.isRecycled()) result.recycle();
+                    return;
+                }
+                if (result == null) return;
+                preferences.edit().putLong("remote_changed", System.currentTimeMillis()).apply();
+                displayed = "";
+                showCaption(false);
+                showRemote(result);
+                root.setBackground(null);
+            });
+        });
+    }
+
+    private static byte[] download(String address) throws IOException {
+        URL url = new URL(address);
+        for (int redirects = 0; redirects <= 5; redirects++) {
+            if (WallpaperSettings.validUrl(url.toString()) == null) {
+                throw new IOException("Wallpaper redirect has an unsupported URL");
+            }
+            HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+            connection.setConnectTimeout(5_000);
+            connection.setReadTimeout(10_000);
+            connection.setInstanceFollowRedirects(false);
+            connection.setUseCaches(false);
+            connection.setRequestProperty("Accept", "image/*, application/octet-stream");
+            connection.setRequestProperty("Cache-Control", "no-cache");
+            connection.setRequestProperty("Pragma", "no-cache");
+            try {
+                int status = connection.getResponseCode();
+                if (status >= 300 && status < 400) {
+                    String location = connection.getHeaderField("Location");
+                    if (location == null || redirects == 5) {
+                        throw new IOException("Too many or invalid wallpaper redirects");
+                    }
+                    url = new URL(url, location);
+                    continue;
+                }
+                if (status < 200 || status >= 300) {
+                    throw new IOException("Wallpaper server returned HTTP " + status);
+                }
+                String contentType = connection.getContentType();
+                String mediaType = contentType == null ? "" : contentType.toLowerCase(java.util.Locale.ROOT);
+                if (contentType != null && !mediaType.startsWith("image/")
+                        && !mediaType.startsWith("application/octet-stream")) {
+                    throw new IOException("Wallpaper server returned a non-image response");
+                }
+                int length = connection.getContentLength();
+                if (length > WallpaperSettings.MAX_IMAGE_BYTES) {
+                    throw new IOException("Wallpaper response exceeds the 10 MB limit");
+                }
+                try (InputStream input = connection.getInputStream();
+                     ByteArrayOutputStream output = new ByteArrayOutputStream(Math.max(0, length))) {
+                    byte[] buffer = new byte[16 * 1024];
+                    int total = 0;
+                    int count;
+                    while ((count = input.read(buffer)) != -1) {
+                        total += count;
+                        if (total > WallpaperSettings.MAX_IMAGE_BYTES) {
+                            throw new IOException("Wallpaper response exceeds the 10 MB limit");
+                        }
+                        output.write(buffer, 0, count);
+                    }
+                    return output.toByteArray();
+                }
+            } finally {
+                connection.disconnect();
+            }
+        }
+        throw new IOException("Too many wallpaper redirects");
+    }
+
+    private Bitmap decode(byte[] data) {
+        try {
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(data, 0, data.length, options);
+            int sourceWidth = options.outWidth, sourceHeight = options.outHeight;
+            if (sourceWidth <= 0 || sourceHeight <= 0) return null;
+            int sample = WallpaperSize.sampleSize(sourceWidth, sourceHeight, width, height);
+            if (!WallpaperSize.accepted(sourceWidth / sample, sourceHeight / sample)) return null;
+            options.inJustDecodeBounds = false;
+            options.inSampleSize = sample;
+            int[] scale = WallpaperSize.coverScale(sourceWidth / sample, sourceHeight / sample, width, height);
+            if (scale != null) {
+                options.inScaled = true;
+                options.inDensity = scale[0];
+                options.inTargetDensity = scale[1];
+            }
+            options.inPreferredConfig = bitmapConfig;
+            options.inMutable = dimColor != 0;
+            Bitmap decoded = BitmapFactory.decodeByteArray(data, 0, data.length, options);
+            if (decoded == null) return null;
+            if (dimColor != 0) new Canvas(decoded).drawColor(dimColor);
+            Bitmap gpu = decoded.copy(Bitmap.Config.HARDWARE, false);
+            if (gpu == null) return decoded;
+            decoded.recycle();
+            return gpu;
+        } catch (Exception | OutOfMemoryError failure) {
+            Log.e("TvHome.Wallpaper", "Could not decode remote wallpaper image", failure);
+            return null;
+        }
+    }
+
+    private void showRemote(Bitmap bitmap) {
+        if (current == null) {
+            if (image.getParent() == null) {
+                root.addView(image, 0, new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            }
+            current = bitmap;
+            image.setImageBitmap(bitmap);
+            image.setAlpha(1f);
+            return;
+        }
+        ImageView next = new ImageView(image.getContext());
+        next.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        next.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        next.setImageBitmap(bitmap);
+        next.setAlpha(0f);
+        root.addView(next, Math.min(1, root.getChildCount()), new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        incoming = next;
+        incomingBitmap = bitmap;
+        transitioning = true;
+        next.animate().alpha(1f).setDuration(dynamicCrossfade).withEndAction(this::finishTransition).start();
+        image.animate().alpha(0f).setDuration(dynamicCrossfade).start();
+    }
+
+    private void finishTransition() {
+        if (!transitioning || incoming == null) return;
+        ImageView oldImage = image;
+        Bitmap oldBitmap = current;
+        ImageView nextImage = incoming;
+        Bitmap nextBitmap = incomingBitmap;
+        incoming = null;
+        incomingBitmap = null;
+        transitioning = false;
+        nextImage.animate().cancel();
+        oldImage.animate().cancel();
+        root.removeView(oldImage);
+        image = nextImage;
+        image.setAlpha(1f);
+        current = nextBitmap;
+        if (oldBitmap != null && oldBitmap != current) root.postDelayed(() -> {
+            if (!oldBitmap.isRecycled()) oldBitmap.recycle();
+        }, 500);
     }
 
     /**

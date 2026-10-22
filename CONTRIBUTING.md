@@ -38,9 +38,10 @@ is reversible from the TV's own settings if the tools are gone.
 ## 2. Improve the launcher
 
 The launcher lives in `launcher/` and is deliberately small: plain Java, AndroidX RecyclerView and
-DynamicAnimation, no Kotlin, no Compose, no network. It targets TVs with 1 GB of RAM, so:
+DynamicAnimation, no Kotlin or Compose. Network access is limited to the opt-in dynamic wallpaper
+feature, which fetches images only while Home is visible. It targets TVs with 1 GB of RAM, so:
 
-- No blur, no video backgrounds, no polling, no background services.
+- No blur, no video backgrounds, no background services or unsolicited network requests.
 - Anything that depends on a specific TV goes in `app/src/main/res/values/config.xml`, not in code.
 - Keep D-pad navigation deterministic. Test Up/Down/Left/Right from every edge.
 - Verify on a real TV, not only the emulator. The easiest way is remote key injection plus a
@@ -109,7 +110,8 @@ points at everything else. The rules for a row are on that page.
 Things that stay in this repo: debloat lists, fixes and small, opt-in features for the reference
 launcher, prompt and tool improvements. A feature that can be its own small app goes in [`addons/`](addons/README.md)
 as a module card. Things that go in the showcase: a second launcher, a
-restyle, a platform port, anything with its own background services or network access.
+restyle, a platform port, anything with its own background services or network access beyond the
+opt-in wallpaper URL fetches.
 
 ## Pull requests
 

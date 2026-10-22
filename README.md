@@ -430,7 +430,8 @@ apps), which is why the report names that loss per package instead of calling it
 ## The launcher
 
 A small native home screen for Android TV: **about 445 KB**, plain Java, built for TVs with 1 GB of RAM.
-No blur, no video, no network permission, no background services.
+No blur, no video or background services. The optional dynamic wallpaper feature requests images from
+the URL you configure, only while Home is visible; it adds the Internet permission.
 
 The **TV** needs Android 8.0 (API 26) or newer: `minSdk` is a compile-time floor in
 [`launcher/app/build.gradle`](launcher/app/build.gradle), and the install script asks the TV for
